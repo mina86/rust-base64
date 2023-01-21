@@ -74,19 +74,21 @@ pub(crate) fn encode_with_padding<E: Engine + ?Sized>(
 ) {
     debug_assert_eq!(expected_encoded_size, output.len());
 
-    let b64_bytes_written = engine.internal_encode(input, output);
-
-    let padding_bytes = if engine.config().encode_padding() {
-        add_padding(b64_bytes_written, &mut output[b64_bytes_written..])
+    let mut written = engine.internal_encode(input, output);
+    let padding = if engine.config().encode_padding() {
+        (4 - written % 4) % 4
     } else {
         0
     };
+    if padding > 0 {
+        debug_assert!(padding <= 2);
+        output[written] = PAD_BYTE;
+        written += padding >> 1;
+        output[written] = PAD_BYTE;
+        written += 1;
+    }
 
-    let encoded_bytes = b64_bytes_written
-        .checked_add(padding_bytes)
-        .expect("usize overflow when calculating b64 length");
-
-    debug_assert_eq!(expected_encoded_size, encoded_bytes);
+    debug_assert_eq!(expected_encoded_size, written);
 }
 
 /// Calculate the base64 encoded length for a given input length, optionally including any
@@ -114,23 +116,6 @@ pub fn encoded_len(bytes_len: usize, padding: bool) -> Option<usize> {
     } else {
         complete_chunk_output
     }
-}
-
-/// Write padding characters.
-/// `unpadded_output_len` is the size of the unpadded but base64 encoded data.
-/// `output` is the slice where padding should be written, of length at least 2.
-///
-/// Returns the number of padding bytes written.
-pub(crate) fn add_padding(unpadded_output_len: usize, output: &mut [u8]) -> usize {
-    let pad_bytes = (4 - (unpadded_output_len % 4)) % 4;
-    // for just a couple bytes, this has better performance than using
-    // .fill(), or iterating over mutable refs, which call memset()
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..pad_bytes {
-        output[i] = PAD_BYTE;
-    }
-
-    pad_bytes
 }
 
 /// Errors that can occur while encoding into a slice.
@@ -425,33 +410,6 @@ mod tests {
 
             // make sure the encoded bytes are UTF-8
             let _ = str::from_utf8(&output[0..encoded_size]).unwrap();
-        }
-    }
-
-    #[test]
-    fn add_padding_random_valid_utf8() {
-        let mut output = Vec::new();
-
-        let mut rng = rand::rngs::SmallRng::from_entropy();
-
-        // cover our bases for length % 4
-        for unpadded_output_len in 0..20 {
-            output.clear();
-
-            // fill output with random
-            for _ in 0..100 {
-                output.push(rng.gen());
-            }
-
-            let orig_output_buf = output.clone();
-
-            let bytes_written = add_padding(unpadded_output_len, &mut output);
-
-            // make sure the part beyond bytes_written is the same garbage it was before
-            assert_eq!(orig_output_buf[bytes_written..], output[bytes_written..]);
-
-            // make sure the encoded bytes are UTF-8
-            let _ = str::from_utf8(&output[0..bytes_written]).unwrap();
         }
     }
 

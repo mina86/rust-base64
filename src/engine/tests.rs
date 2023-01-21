@@ -12,7 +12,6 @@ use std::{collections, fmt};
 
 use crate::{
     alphabet::{Alphabet, STANDARD},
-    encode::add_padding,
     encoded_len,
     engine::{general_purpose, naive, Config, DecodeEstimate, DecodePaddingMode, Engine},
     tests::{assert_encode_sanity, random_alphabet, random_config},
@@ -1282,6 +1281,23 @@ fn prefixed_data<'i>(input_with_prefix: &'i mut String, prefix_len: usize, data:
     input_with_prefix.truncate(prefix_len);
     input_with_prefix.push_str(data);
     input_with_prefix.as_str()
+}
+
+/// Write padding characters.
+/// `unpadded_output_len` is the size of the unpadded but base64 encoded data.
+/// `output` is the slice where padding should be written, of length at least 2.
+///
+/// Returns the number of padding bytes written.
+pub(crate) fn add_padding(unpadded_output_len: usize, output: &mut [u8]) -> usize {
+    let pad_bytes = (4 - (unpadded_output_len % 4)) % 4;
+    // for just a couple bytes, this has better performance than using
+    // .fill(), or iterating over mutable refs, which call memset()
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..pad_bytes {
+        output[i] = PAD_BYTE;
+    }
+
+    pad_bytes
 }
 
 /// A wrapper to make using engines in rstest fixtures easier.
