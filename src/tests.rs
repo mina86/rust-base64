@@ -27,6 +27,7 @@ fn roundtrip_random_config_long() {
     roundtrip_random_config(Uniform::new(0, 1000), 10_000);
 }
 
+#[track_caller]
 pub fn assert_encode_sanity(encoded: &str, padded: bool, input_len: usize) {
     let input_rem = input_len % 3;
     let expected_padding_len = if input_rem > 0 {

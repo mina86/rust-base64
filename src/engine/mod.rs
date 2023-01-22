@@ -55,7 +55,7 @@ pub trait Engine: Send + Sync {
     ///
     /// Must not write any bytes into the output slice other than the encoded data.
     #[doc(hidden)]
-    fn internal_encode(&self, input: &[u8], output: &mut [u8]) -> usize;
+    fn internal_encode(&self, input: &[u8], output: &mut [core::mem::MaybeUninit<u8>]) -> usize;
 
     /// This is not meant to be called directly; it is only for `Engine` implementors.
     ///
@@ -119,9 +119,12 @@ pub trait Engine: Send + Sync {
     fn encode<T: AsRef<[u8]>>(&self, input: T) -> String {
         let encoded_size = encoded_len(input.as_ref().len(), self.config().encode_padding())
             .expect("integer overflow when calculating buffer size");
-        let mut buf = vec![0; encoded_size];
-
-        encode_with_padding(input.as_ref(), &mut buf[..], self, encoded_size);
+        let mut buf = Vec::with_capacity(encoded_size);
+        // buf’s capacity may be longer than encoded_size so need to truncate.
+        let output = &mut buf.spare_capacity_mut()[..encoded_size];
+        encode_with_padding(input.as_ref(), output, self, encoded_size);
+        // SAFETY: encode_with_padding initialised the data.
+        unsafe { buf.set_len(encoded_size) };
 
         String::from_utf8(buf).expect("Invalid UTF8")
     }
@@ -185,6 +188,38 @@ pub trait Engine: Send + Sync {
         &self,
         input: T,
         output_buf: &mut [u8],
+    ) -> Result<usize, EncodeSliceError> {
+        // SAFETY: [u8] has the same layout as [MaybeUninit<u8>] and since u8 is
+        // POD, it’s safe to overwrite values without dropping them first.
+        let output_buf = unsafe { core::mem::transmute(output_buf) };
+        self.encode_buf(input, output_buf)
+    }
+
+    /// Encode arbitrary octets as base64 into a supplied slice.
+    /// Writes into the supplied output buffer.
+    ///
+    /// This is useful if you wish to avoid allocation entirely (e.g. encoding into a stack-resident
+    /// or statically-allocated buffer).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use base64::{Engine as _, engine::general_purpose};
+    /// let s = b"hello internet!";
+    /// // make sure we'll have a slice big enough for base64 + padding
+    /// let mut buf = Vec::with_capacity(s.len() * 4 / 3 + 4);
+    /// let bytes_written = general_purpose::STANDARD.encode_buf(
+    ///     s, buf.spare_capacity_mut()
+    /// ).unwrap();
+    /// // SAFETY: encode_buf initialised the first bytes_written elements.
+    /// unsafe { buf.set_len(bytes_written) };
+    ///
+    /// assert_eq!(s, general_purpose::STANDARD.decode(&buf).unwrap().as_slice());
+    /// ```
+    fn encode_buf<T: AsRef<[u8]>>(
+        &self,
+        input: T,
+        output_buf: &mut [core::mem::MaybeUninit<u8>],
     ) -> Result<usize, EncodeSliceError> {
         let input_bytes = input.as_ref();
 

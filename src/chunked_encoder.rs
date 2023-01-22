@@ -27,7 +27,7 @@ impl<'e, E: Engine + ?Sized> ChunkedEncoder<'e, E> {
         const BUF_SIZE: usize = 1024;
         const CHUNK_SIZE: usize = BUF_SIZE / 4 * 3;
 
-        let mut buf = [0; BUF_SIZE];
+        let mut buf = [core::mem::MaybeUninit::uninit(); BUF_SIZE];
         for chunk in bytes.chunks(CHUNK_SIZE) {
             let mut len = self.engine.internal_encode(chunk, &mut buf);
             if chunk.len() != CHUNK_SIZE && self.engine.config().encode_padding() {
@@ -35,11 +35,18 @@ impl<'e, E: Engine + ?Sized> ChunkedEncoder<'e, E> {
                 // four bytes if required by config.
                 let padding = 4 - (len % 4);
                 if padding != 4 {
-                    buf[len..(len + padding)].fill(crate::PAD_BYTE);
+                    buf[len..(len + padding)].iter_mut().for_each(|cell| {
+                        let _ = cell.write(crate::PAD_BYTE);
+                    });
                     len += padding;
                 }
             }
-            sink.write_encoded_bytes(&buf[..len])?;
+
+            let bytes: *const [_] = &buf[..len];
+            // SAFETY: [MaybeUninit<u8>] has the same layout as [u8] and we’ve
+            // just written to len first elements.  TODO: Switch to using
+            // MaybeUninit::slice_assume_init_ref once that’s stable.
+            sink.write_encoded_bytes(unsafe { &*(bytes as *const [u8]) })?;
         }
 
         Ok(())

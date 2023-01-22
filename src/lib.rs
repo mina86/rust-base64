@@ -130,7 +130,6 @@
     variant_size_differences,
     warnings
 )]
-#![forbid(unsafe_code)]
 // Allow globally until https://github.com/rust-lang/rust-clippy/issues/8768 is resolved.
 // The desired state is to allow it only for the rstest_reuse import.
 #![allow(clippy::single_component_path_imports)]

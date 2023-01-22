@@ -68,7 +68,7 @@ pub fn encode_engine_slice<E: Engine, T: AsRef<[u8]>>(
 /// All bytes in `output` will be written to since it is exactly the size of the output.
 pub(crate) fn encode_with_padding<E: Engine + ?Sized>(
     input: &[u8],
-    output: &mut [u8],
+    output: &mut [core::mem::MaybeUninit<u8>],
     engine: &E,
     expected_encoded_size: usize,
 ) {
@@ -82,9 +82,9 @@ pub(crate) fn encode_with_padding<E: Engine + ?Sized>(
     };
     if padding > 0 {
         debug_assert!(padding <= 2);
-        output[written] = PAD_BYTE;
+        let _ = output[written].write(PAD_BYTE);
         written += padding >> 1;
-        output[written] = PAD_BYTE;
+        let _ = output[written].write(PAD_BYTE);
         written += 1;
     }
 
@@ -364,7 +364,7 @@ mod tests {
 
             let orig_output_buf = output.clone();
 
-            let bytes_written = engine.internal_encode(&input, &mut output);
+            let bytes_written = engine.internal_encode(&input, as_uninit(&mut output));
 
             // make sure the part beyond bytes_written is the same garbage it was before
             assert_eq!(orig_output_buf[bytes_written..], output[bytes_written..]);
@@ -403,7 +403,12 @@ mod tests {
 
             let orig_output_buf = output.clone();
 
-            encode_with_padding(&input, &mut output[0..encoded_size], &engine, encoded_size);
+            encode_with_padding(
+                &input,
+                as_uninit(&mut output[0..encoded_size]),
+                &engine,
+                encoded_size,
+            );
 
             // make sure the part beyond b64 is the same garbage it was before
             assert_eq!(orig_output_buf[encoded_size..], output[encoded_size..]);
@@ -442,5 +447,10 @@ mod tests {
                 .encode(b"\xFB\xFF")
                 .replace('/', ",")
         );
+    }
+
+    /// Casts `[u8]` slice to `[MaybeUninit<u8>]`.
+    fn as_uninit(slice: &mut [u8]) -> &mut [core::mem::MaybeUninit<u8>] {
+        unsafe { core::mem::transmute(slice) }
     }
 }

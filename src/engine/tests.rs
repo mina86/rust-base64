@@ -51,7 +51,7 @@ fn rfc_test_vectors_std_alphabet<E: EngineWrapper>(engine_wrapper: E) {
         // internal_encode always encodes without padding.
         {
             let mut buffer = [0; 8];
-            let len = engine.internal_encode(decoded, &mut buffer[..]);
+            let len = engine.internal_encode(decoded, as_uninit(&mut buffer[..]));
             let (got_encoded, tail) = buffer.split_at(len);
             assert_eq!(encoded_no_padding.as_bytes(), got_encoded);
             assert!(tail.iter().all(|v| *v == 0));
@@ -62,7 +62,11 @@ fn rfc_test_vectors_std_alphabet<E: EngineWrapper>(engine_wrapper: E) {
             let mut buffer = [0; 8];
             let len = engine.encode_slice(decoded, &mut buffer[..]).unwrap();
             let (got_encoded, tail) = buffer.split_at(len);
-            let want_encoded = if engine_with_padding { encoded } else { encoded_no_padding };
+            let want_encoded = if engine_with_padding {
+                encoded
+            } else {
+                encoded_no_padding
+            };
             assert_eq!(want_encoded.as_bytes(), got_encoded);
             assert!(tail.iter().all(|v| *v == 0));
         }
@@ -168,7 +172,7 @@ fn encode_doesnt_write_extra_bytes<E: EngineWrapper>(engine_wrapper: E) {
         let expected_encode_len_no_pad = encoded_len(orig_len, false).unwrap();
 
         let encoded_len_no_pad =
-            engine.internal_encode(&orig_data[..], &mut encode_buf[prefix_len..]);
+            engine.internal_encode(&orig_data[..], as_uninit(&mut encode_buf[prefix_len..]));
         assert_eq!(expected_encode_len_no_pad, encoded_len_no_pad);
 
         // no writes past what it claimed to write
@@ -188,10 +192,7 @@ fn encode_doesnt_write_extra_bytes<E: EngineWrapper>(engine_wrapper: E) {
 
         // pad so we can decode it in case our random engine requires padding
         let pad_len = if padded {
-            add_padding(
-                encoded_len_no_pad,
-                &mut encode_buf[prefix_len + encoded_len_no_pad..],
-            )
+            add_padding(encoded_len_no_pad, as_uninit(&mut encode_buf[prefix_len + encoded_len_no_pad..]))
         } else {
             0
         };
@@ -376,9 +377,9 @@ fn decode_detect_invalid_last_symbol_every_possible_two_symbols<E: EngineWrapper
     let mut base64_to_bytes = collections::HashMap::new();
 
     for b in 0_u8..=255 {
-        let mut b64 = vec![0_u8; 4];
-        assert_eq!(2, engine.internal_encode(&[b], &mut b64[..]));
-        let _ = add_padding(2, &mut b64[2..]);
+        let mut b64 = [0_u8; 4];
+        assert_eq!(2, engine.internal_encode(&[b], as_uninit(&mut b64[..])));
+        let _ = add_padding(2, as_uninit(&mut b64[2..]));
 
         assert!(base64_to_bytes.insert(b64, vec![b]).is_none());
     }
@@ -436,9 +437,9 @@ fn decode_detect_invalid_last_symbol_every_possible_three_symbols<E: EngineWrapp
         bytes[0] = b1;
         for b2 in 0_u8..=255 {
             bytes[1] = b2;
-            let mut b64 = vec![0_u8; 4];
-            assert_eq!(3, engine.internal_encode(&bytes, &mut b64[..]));
-            let _ = add_padding(3, &mut b64[3..]);
+            let mut b64 = [0_u8; 4];
+            assert_eq!(3, engine.internal_encode(&bytes, as_uninit(&mut b64[..])));
+            let _ = add_padding(3, as_uninit(&mut b64[3..]));
 
             let mut v = Vec::with_capacity(2);
             v.extend_from_slice(&bytes[..]);
@@ -1228,7 +1229,7 @@ fn estimate_via_u128_inflation<E: EngineWrapper>(engine_wrapper: E) {
 fn generate_random_encoded_data<E: Engine, R: rand::Rng, D: distributions::Distribution<usize>>(
     engine: &E,
     orig_data: &mut Vec<u8>,
-    encode_buf: &mut Vec<u8>,
+    encode_vec: &mut Vec<u8>,
     rng: &mut R,
     length_distribution: &D,
 ) -> (usize, usize, usize) {
@@ -1236,17 +1237,19 @@ fn generate_random_encoded_data<E: Engine, R: rand::Rng, D: distributions::Distr
 
     let orig_len = fill_rand(orig_data, rng, length_distribution);
     let expected_encoded_len = encoded_len(orig_len, padding).unwrap();
-    encode_buf.resize(expected_encoded_len, 0);
+    encode_vec.reserve(expected_encoded_len);
+    let enc_buf = &mut encode_vec.spare_capacity_mut()[..expected_encoded_len];
 
-    let base_encoded_len = engine.internal_encode(&orig_data[..], &mut encode_buf[..]);
+    let base_encoded_len = engine.internal_encode(&orig_data[..], enc_buf);
 
     let enc_len_with_padding = if padding {
-        base_encoded_len + add_padding(base_encoded_len, &mut encode_buf[base_encoded_len..])
+        base_encoded_len + add_padding(base_encoded_len, &mut enc_buf[base_encoded_len..])
     } else {
         base_encoded_len
     };
 
     assert_eq!(expected_encoded_len, enc_len_with_padding);
+    unsafe { encode_vec.set_len(enc_len_with_padding) };
 
     (orig_len, base_encoded_len, enc_len_with_padding)
 }
@@ -1277,18 +1280,22 @@ fn prefixed_data<'i>(input_with_prefix: &'i mut String, prefix_len: usize, data:
     input_with_prefix.as_str()
 }
 
+/// Casts `[u8]` slice to `[MaybeUninit<u8>]`.
+fn as_uninit(slice: &mut [u8]) -> &mut [core::mem::MaybeUninit<u8>] {
+    unsafe { core::mem::transmute(slice) }
+}
+
 /// Write padding characters.
 /// `unpadded_output_len` is the size of the unpadded but base64 encoded data.
 /// `output` is the slice where padding should be written, of length at least 2.
 ///
 /// Returns the number of padding bytes written.
-pub(crate) fn add_padding(unpadded_output_len: usize, output: &mut [u8]) -> usize {
+pub(crate) fn add_padding(unpadded_output_len: usize, output: &mut [core::mem::MaybeUninit<u8>]) -> usize {
     let pad_bytes = (4 - (unpadded_output_len % 4)) % 4;
     // for just a couple bytes, this has better performance than using
     // .fill(), or iterating over mutable refs, which call memset()
-    #[allow(clippy::needless_range_loop)]
     for i in 0..pad_bytes {
-        output[i] = PAD_BYTE;
+        let _ = output[i].write(PAD_BYTE);
     }
 
     pad_bytes

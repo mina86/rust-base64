@@ -43,7 +43,7 @@ impl Engine for Naive {
     type Config = NaiveConfig;
     type DecodeEstimate = NaiveEstimate;
 
-    fn internal_encode(&self, input: &[u8], output: &mut [u8]) -> usize {
+    fn internal_encode(&self, input: &[u8], output: &mut [core::mem::MaybeUninit<u8>]) -> usize {
         // complete chunks first
 
         const LOW_SIX_BITS: u32 = 0x3F;
@@ -57,6 +57,7 @@ impl Engine for Naive {
         if let Some(last_complete_chunk_index) =
             complete_chunk_len.checked_sub(Self::ENCODE_INPUT_CHUNK_SIZE)
         {
+            #[allow(unused_results)]
             while input_index <= last_complete_chunk_index {
                 let chunk = &input[input_index..input_index + Self::ENCODE_INPUT_CHUNK_SIZE];
 
@@ -64,13 +65,13 @@ impl Engine for Naive {
                 let chunk_int: u32 =
                     (chunk[0] as u32).shl(16) | (chunk[1] as u32).shl(8) | (chunk[2] as u32);
                 // encode 4x 6-bit output bytes
-                output[output_index] = self.encode_table[chunk_int.shr(18) as usize];
-                output[output_index + 1] =
-                    self.encode_table[chunk_int.shr(12_u8).bitand(LOW_SIX_BITS) as usize];
-                output[output_index + 2] =
-                    self.encode_table[chunk_int.shr(6_u8).bitand(LOW_SIX_BITS) as usize];
-                output[output_index + 3] =
-                    self.encode_table[chunk_int.bitand(LOW_SIX_BITS) as usize];
+                output[output_index].write(self.encode_table[chunk_int.shr(18) as usize]);
+                output[output_index + 1]
+                    .write(self.encode_table[chunk_int.shr(12_u8).bitand(LOW_SIX_BITS) as usize]);
+                output[output_index + 2]
+                    .write(self.encode_table[chunk_int.shr(6_u8).bitand(LOW_SIX_BITS) as usize]);
+                output[output_index + 3]
+                    .write(self.encode_table[chunk_int.bitand(LOW_SIX_BITS) as usize]);
 
                 input_index += Self::ENCODE_INPUT_CHUNK_SIZE;
                 output_index += 4;
@@ -78,25 +79,28 @@ impl Engine for Naive {
         }
 
         // then leftovers
+        #[allow(unused_results)]
         if rem == 2 {
             let chunk = &input[input_index..input_index + 2];
 
             // high six bits of chunk[0]
-            output[output_index] = self.encode_table[chunk[0].shr(2) as usize];
+            output[output_index].write(self.encode_table[chunk[0].shr(2) as usize]);
             // bottom 2 bits of [0], high 4 bits of [1]
-            output[output_index + 1] =
+            output[output_index + 1].write(
                 self.encode_table[(chunk[0].shl(4_u8).bitor(chunk[1].shr(4_u8)) as u32)
-                    .bitand(LOW_SIX_BITS) as usize];
+                    .bitand(LOW_SIX_BITS) as usize],
+            );
             // bottom 4 bits of [1], with the 2 bottom bits as zero
-            output[output_index + 2] =
-                self.encode_table[(chunk[1].shl(2_u8) as u32).bitand(LOW_SIX_BITS) as usize];
+            output[output_index + 2].write(
+                self.encode_table[(chunk[1].shl(2_u8) as u32).bitand(LOW_SIX_BITS) as usize],
+            );
 
             output_index += 3;
         } else if rem == 1 {
             let byte = input[input_index];
-            output[output_index] = self.encode_table[byte.shr(2) as usize];
-            output[output_index + 1] =
-                self.encode_table[(byte.shl(4_u8) as u32).bitand(LOW_SIX_BITS) as usize];
+            output[output_index].write(self.encode_table[byte.shr(2) as usize]);
+            output[output_index + 1]
+                .write(self.encode_table[(byte.shl(4_u8) as u32).bitand(LOW_SIX_BITS) as usize]);
             output_index += 2;
         }
 

@@ -73,22 +73,91 @@ pub struct EncoderWriter<'e, E: Engine, W: io::Write> {
     extra_input_occupied_len: usize,
     /// Buffer to encode into. May hold leftover encoded bytes from a previous write call that the underlying writer
     /// did not write last time.
-    output: [u8; BUF_SIZE],
-    /// How much of `output` is occupied with encoded data that couldn't be written last time
-    output_occupied_len: usize,
+    output: Buffer,
     /// panic safety: don't write again in destructor if writer panicked while we were writing to it
     panicked: bool,
 }
 
+struct Buffer {
+    buf: [core::mem::MaybeUninit<u8>; BUF_SIZE],
+    // Invariant: buf[..occupied] has been initialised.
+    occupied: usize,
+}
+
+impl Buffer {
+    fn new() -> Self {
+        Self {
+            buf: [core::mem::MaybeUninit::uninit(); BUF_SIZE],
+            occupied: 0,
+        }
+    }
+
+    /// Returns whether there is any occupied portion of the buffer.
+    fn is_empty(&self) -> bool {
+        self.occupied == 0
+    }
+
+    /// Resets occupied length to zero.
+    fn clear(&mut self) {
+        self.occupied = 0;
+    }
+
+    /// Returns shared view of the occupied portion of the buffer.
+    fn occupied(&self) -> &[u8] {
+        let slice: *const [_] = &self.buf[..self.occupied];
+        // SAFETY: [MaybeUninit<u8>] has the same layout as [u8] and the
+        // invariant is that first occupied bytes are initialised.  TODO: Switch
+        // to using MaybeUninit::slice_assume_init_ref once that’s stable.
+        unsafe { &*(slice as *const [u8]) }
+    }
+
+    /// Returns exclusive view of the occupied portion of the buffer.
+    fn occupied_mut(&mut self) -> &mut [u8] {
+        let slice: *mut [_] = &mut self.buf[..self.occupied];
+        // SAFETY: [MaybeUninit<u8>] has the same layout as [u8] and the
+        // invariant is that first occupied bytes are initialised.  TODO: Switch
+        // to using MaybeUninit::slice_assume_init_ref once that’s stable.
+        unsafe { &mut *(slice as *mut [u8]) }
+    }
+
+    /// Returns length of the unoccupied portion of the buffer.
+    fn unoccupied_len(&mut self) -> usize {
+        self.buf.len() - self.occupied
+    }
+
+    /// Removes the first `consumed` bytes from the buffer bringing any
+    /// remainder to the front of the buffer.
+    ///
+    /// # Panics
+    /// This function will panic if `consumed` is more than the size of occupied
+    /// portion of the buffer.
+    fn consume(&mut self, consumed: usize) {
+        let occupied = self.occupied;
+        self.occupied_mut().copy_within(consumed..occupied, 0);
+        self.occupied -= consumed;
+    }
+
+    /// Extends buffer with data written by given callback.
+    ///
+    /// The callback is passed slice of unoccupied portion of the output buffer
+    /// and returns how much data it wrote to the buffer.  It’s UB if the
+    /// callback writes less data then it claims.
+    unsafe fn extend_with(&mut self, func: impl Fn(&mut [core::mem::MaybeUninit<u8>]) -> usize) {
+        self.occupied += func(&mut self.buf[self.occupied..]);
+    }
+}
+
 impl<'e, E: Engine, W: io::Write> fmt::Debug for EncoderWriter<'e, E, W> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let output = self.output.occupied();
+        let truncated_len = output.len().min(5);
         write!(
             f,
-            "extra_input: {:?} extra_input_occupied_len:{:?} output[..5]: {:?} output_occupied_len: {:?}",
-            self.extra_input,
-            self.extra_input_occupied_len,
-            &self.output[0..5],
-            self.output_occupied_len
+            "extra_input: {:?} output[..{}]: {:?} output_occupied_len: {:?}",
+            &self.extra_input[..self.extra_input_occupied_len],
+            truncated_len,
+            &output[..truncated_len],
+            output.len()
         )
     }
 }
@@ -101,8 +170,7 @@ impl<'e, E: Engine, W: io::Write> EncoderWriter<'e, E, W> {
             delegate: Some(delegate),
             extra_input: [0u8; MIN_ENCODE_CHUNK_SIZE],
             extra_input_occupied_len: 0,
-            output: [0u8; BUF_SIZE],
-            output_occupied_len: 0,
+            output: Buffer::new(),
             panicked: false,
         }
     }
@@ -145,18 +213,19 @@ impl<'e, E: Engine, W: io::Write> EncoderWriter<'e, E, W> {
             return Ok(());
         }
 
-        self.write_all_encoded_output()?;
+        if self.extra_input_occupied_len == 0 || self.output.unoccupied_len() < 4 {
+            self.write_all_encoded_output()?;
+            debug_assert_eq!(0, self.output.occupied);
+        }
 
         if self.extra_input_occupied_len > 0 {
-            let encoded_len = self
-                .engine
-                .encode_slice(
-                    &self.extra_input[..self.extra_input_occupied_len],
-                    &mut self.output[..],
-                )
-                .expect("buffer is large enough");
-
-            self.output_occupied_len = encoded_len;
+            unsafe {
+                self.output.extend_with(|buffer| {
+                    self.engine
+                        .encode_buf(&self.extra_input[..self.extra_input_occupied_len], buffer)
+                        .expect("buffer is large enough")
+                })
+            }
 
             self.write_all_encoded_output()?;
 
@@ -175,24 +244,15 @@ impl<'e, E: Engine, W: io::Write> EncoderWriter<'e, E, W> {
     /// Errors from the delegate writer are returned. In the case of an error,
     /// `self.output_occupied_len` will not be updated, as errors from `write` are specified to mean
     /// that no write took place.
-    fn write_to_delegate(&mut self, current_output_len: usize) -> Result<()> {
+    fn write_to_delegate(&mut self) -> Result<()> {
         self.panicked = true;
         let res = self
             .delegate
             .as_mut()
             .expect("Writer must be present")
-            .write(&self.output[..current_output_len]);
+            .write(self.output.occupied());
         self.panicked = false;
-
-        res.map(|consumed| {
-            self.output_occupied_len = current_output_len.checked_sub(consumed).unwrap();
-            if self.output_occupied_len > 0 {
-                // If we're blocking on I/O, the minor inefficiency of copying bytes to the
-                // start of the buffer is the least of our concerns...
-                self.output
-                    .copy_within(consumed..consumed + self.output_occupied_len, 0)
-            }
-        })
+        res.map(|consumed| self.output.consume(consumed))
     }
 
     /// Write all buffered encoded output. If this returns `Ok`, `self.output_occupied_len` is `0`.
@@ -205,9 +265,8 @@ impl<'e, E: Engine, W: io::Write> EncoderWriter<'e, E, W> {
     /// Any error emitted by the delegate writer abort the write loop and is returned, unless it's
     /// `Interrupted`, in which case the error is ignored and writes will continue.
     fn write_all_encoded_output(&mut self) -> Result<()> {
-        while self.output_occupied_len > 0 {
-            let remaining_len = self.output_occupied_len;
-            match self.write_to_delegate(remaining_len) {
+        while !self.output.is_empty() {
+            match self.write_to_delegate() {
                 // try again on interrupts ala write_all
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
                 // other errors return
@@ -217,7 +276,7 @@ impl<'e, E: Engine, W: io::Write> EncoderWriter<'e, E, W> {
             };
         }
 
-        debug_assert_eq!(0, self.output_occupied_len);
+        debug_assert_eq!(0, self.output.occupied);
         Ok(())
     }
 
@@ -274,15 +333,10 @@ impl<'e, E: Engine, W: io::Write> io::Write for EncoderWriter<'e, E, W> {
         // internal state to what it was before the error occurred
 
         // before reading any input, write any leftover encoded output from last time
-        if self.output_occupied_len > 0 {
-            let current_len = self.output_occupied_len;
-            return self
-                .write_to_delegate(current_len)
-                // did not read any input
-                .map(|_| 0);
+        if !self.output.is_empty() {
+            // Didn’t read any input so return 0 on success.
+            return self.write_to_delegate().map(|_| 0);
         }
-
-        debug_assert_eq!(0, self.output_occupied_len);
 
         // how many bytes, if any, were read into `extra` to create a triple to encode
         let mut extra_input_read_len = 0;
@@ -290,7 +344,6 @@ impl<'e, E: Engine, W: io::Write> io::Write for EncoderWriter<'e, E, W> {
 
         let orig_extra_len = self.extra_input_occupied_len;
 
-        let mut encoded_size = 0;
         // always a multiple of MIN_ENCODE_CHUNK_SIZE
         let mut max_input_len = MAX_INPUT_LEN;
 
@@ -310,20 +363,22 @@ impl<'e, E: Engine, W: io::Write> io::Write for EncoderWriter<'e, E, W> {
                 self.extra_input[self.extra_input_occupied_len..MIN_ENCODE_CHUNK_SIZE]
                     .copy_from_slice(&input[0..extra_input_read_len]);
 
-                let len = self.engine.internal_encode(
-                    &self.extra_input[0..MIN_ENCODE_CHUNK_SIZE],
-                    &mut self.output[..],
-                );
-                debug_assert_eq!(4, len);
+                unsafe {
+                    self.output.extend_with(|buffer| {
+                        let len = self
+                            .engine
+                            .internal_encode(&self.extra_input[..MIN_ENCODE_CHUNK_SIZE], buffer);
+                        debug_assert_eq!(4, len);
+                        len
+                    })
+                };
 
                 input = &input[extra_input_read_len..];
 
                 // consider extra to be used up, since we encoded it
                 self.extra_input_occupied_len = 0;
-                // don't clobber where we just encoded to
-                encoded_size = 4;
                 // and don't read more than can be encoded
-                max_input_len = MAX_INPUT_LEN - MIN_ENCODE_CHUNK_SIZE;
+                max_input_len -= MIN_ENCODE_CHUNK_SIZE;
 
             // fall through to normal encoding
             } else {
@@ -344,7 +399,6 @@ impl<'e, E: Engine, W: io::Write> io::Write for EncoderWriter<'e, E, W> {
         };
 
         // either 0 or 1 complete chunks encoded from extra
-        debug_assert!(encoded_size == 0 || encoded_size == 4);
         debug_assert!(
             // didn't encode extra input
             MAX_INPUT_LEN == max_input_len
@@ -358,24 +412,23 @@ impl<'e, E: Engine, W: io::Write> io::Write for EncoderWriter<'e, E, W> {
         debug_assert_eq!(0, max_input_len % MIN_ENCODE_CHUNK_SIZE);
         debug_assert_eq!(0, input_chunks_to_encode_len % MIN_ENCODE_CHUNK_SIZE);
 
-        encoded_size += self.engine.internal_encode(
-            &input[..(input_chunks_to_encode_len)],
-            &mut self.output[encoded_size..],
-        );
+        unsafe {
+            self.output.extend_with(|buffer| {
+                self.engine
+                    .internal_encode(&input[..(input_chunks_to_encode_len)], buffer)
+            })
+        };
 
-        // not updating `self.output_occupied_len` here because if the below write fails, it should
-        // "never take place" -- the buffer contents we encoded are ignored and perhaps retried
-        // later, if the consumer chooses.
-
-        self.write_to_delegate(encoded_size)
-            // no matter whether we wrote the full encoded buffer or not, we consumed the same
-            // input
+        self.write_to_delegate()
             .map(|_| extra_input_read_len + input_chunks_to_encode_len)
-            .map_err(|e| {
-                // in case we filled and encoded `extra`, reset extra_len
+            .map_err(|err| {
+                // Reset output and extra_input_occupied_len because if the
+                // write fails, it should "never take place".  The buffer
+                // contents we encoded are ignored and perhaps retried later, if
+                // the consumer chooses.
+                self.output.clear();
                 self.extra_input_occupied_len = orig_extra_len;
-
-                e
+                err
             })
     }
 

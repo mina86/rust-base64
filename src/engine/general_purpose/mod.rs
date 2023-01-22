@@ -42,7 +42,7 @@ impl super::Engine for GeneralPurpose {
     type Config = GeneralPurposeConfig;
     type DecodeEstimate = GeneralPurposeEstimate;
 
-    fn internal_encode(&self, input: &[u8], output: &mut [u8]) -> usize {
+    fn internal_encode(&self, input: &[u8], output: &mut [core::mem::MaybeUninit<u8>]) -> usize {
         let mut input_index: usize = 0;
 
         const BLOCKS_PER_FAST_LOOP: usize = 4;
@@ -59,8 +59,6 @@ impl super::Engine for GeneralPurpose {
                 // on the output side
                 let input_chunk =
                     &input[input_index..(input_index + (BLOCKS_PER_FAST_LOOP * 6 + 2))];
-                let output_chunk =
-                    &mut output[output_index..(output_index + BLOCKS_PER_FAST_LOOP * 8)];
 
                 // Hand-unrolling for 32 vs 16 or 8 bytes produces yields performance about equivalent
                 // to unsafe pointer code on a Xeon E5-1650v3. 64 byte unrolling was slightly better for
@@ -70,49 +68,57 @@ impl super::Engine for GeneralPurpose {
                 // Plus, single-digit percentage performance differences might well be quite different
                 // on different hardware.
 
+                let mut tmp = [0; 32];
+
                 let input_u64 = read_u64(&input_chunk[0..]);
 
-                output_chunk[0] = self.encode_table[((input_u64 >> 58) & LOW_SIX_BITS) as usize];
-                output_chunk[1] = self.encode_table[((input_u64 >> 52) & LOW_SIX_BITS) as usize];
-                output_chunk[2] = self.encode_table[((input_u64 >> 46) & LOW_SIX_BITS) as usize];
-                output_chunk[3] = self.encode_table[((input_u64 >> 40) & LOW_SIX_BITS) as usize];
-                output_chunk[4] = self.encode_table[((input_u64 >> 34) & LOW_SIX_BITS) as usize];
-                output_chunk[5] = self.encode_table[((input_u64 >> 28) & LOW_SIX_BITS) as usize];
-                output_chunk[6] = self.encode_table[((input_u64 >> 22) & LOW_SIX_BITS) as usize];
-                output_chunk[7] = self.encode_table[((input_u64 >> 16) & LOW_SIX_BITS) as usize];
+                tmp[0] = self.encode_table[((input_u64 >> 58) & LOW_SIX_BITS) as usize];
+                tmp[1] = self.encode_table[((input_u64 >> 52) & LOW_SIX_BITS) as usize];
+                tmp[2] = self.encode_table[((input_u64 >> 46) & LOW_SIX_BITS) as usize];
+                tmp[3] = self.encode_table[((input_u64 >> 40) & LOW_SIX_BITS) as usize];
+                tmp[4] = self.encode_table[((input_u64 >> 34) & LOW_SIX_BITS) as usize];
+                tmp[5] = self.encode_table[((input_u64 >> 28) & LOW_SIX_BITS) as usize];
+                tmp[6] = self.encode_table[((input_u64 >> 22) & LOW_SIX_BITS) as usize];
+                tmp[7] = self.encode_table[((input_u64 >> 16) & LOW_SIX_BITS) as usize];
 
                 let input_u64 = read_u64(&input_chunk[6..]);
 
-                output_chunk[8] = self.encode_table[((input_u64 >> 58) & LOW_SIX_BITS) as usize];
-                output_chunk[9] = self.encode_table[((input_u64 >> 52) & LOW_SIX_BITS) as usize];
-                output_chunk[10] = self.encode_table[((input_u64 >> 46) & LOW_SIX_BITS) as usize];
-                output_chunk[11] = self.encode_table[((input_u64 >> 40) & LOW_SIX_BITS) as usize];
-                output_chunk[12] = self.encode_table[((input_u64 >> 34) & LOW_SIX_BITS) as usize];
-                output_chunk[13] = self.encode_table[((input_u64 >> 28) & LOW_SIX_BITS) as usize];
-                output_chunk[14] = self.encode_table[((input_u64 >> 22) & LOW_SIX_BITS) as usize];
-                output_chunk[15] = self.encode_table[((input_u64 >> 16) & LOW_SIX_BITS) as usize];
+                tmp[8] = self.encode_table[((input_u64 >> 58) & LOW_SIX_BITS) as usize];
+                tmp[9] = self.encode_table[((input_u64 >> 52) & LOW_SIX_BITS) as usize];
+                tmp[10] = self.encode_table[((input_u64 >> 46) & LOW_SIX_BITS) as usize];
+                tmp[11] = self.encode_table[((input_u64 >> 40) & LOW_SIX_BITS) as usize];
+                tmp[12] = self.encode_table[((input_u64 >> 34) & LOW_SIX_BITS) as usize];
+                tmp[13] = self.encode_table[((input_u64 >> 28) & LOW_SIX_BITS) as usize];
+                tmp[14] = self.encode_table[((input_u64 >> 22) & LOW_SIX_BITS) as usize];
+                tmp[15] = self.encode_table[((input_u64 >> 16) & LOW_SIX_BITS) as usize];
 
                 let input_u64 = read_u64(&input_chunk[12..]);
 
-                output_chunk[16] = self.encode_table[((input_u64 >> 58) & LOW_SIX_BITS) as usize];
-                output_chunk[17] = self.encode_table[((input_u64 >> 52) & LOW_SIX_BITS) as usize];
-                output_chunk[18] = self.encode_table[((input_u64 >> 46) & LOW_SIX_BITS) as usize];
-                output_chunk[19] = self.encode_table[((input_u64 >> 40) & LOW_SIX_BITS) as usize];
-                output_chunk[20] = self.encode_table[((input_u64 >> 34) & LOW_SIX_BITS) as usize];
-                output_chunk[21] = self.encode_table[((input_u64 >> 28) & LOW_SIX_BITS) as usize];
-                output_chunk[22] = self.encode_table[((input_u64 >> 22) & LOW_SIX_BITS) as usize];
-                output_chunk[23] = self.encode_table[((input_u64 >> 16) & LOW_SIX_BITS) as usize];
+                tmp[16] = self.encode_table[((input_u64 >> 58) & LOW_SIX_BITS) as usize];
+                tmp[17] = self.encode_table[((input_u64 >> 52) & LOW_SIX_BITS) as usize];
+                tmp[18] = self.encode_table[((input_u64 >> 46) & LOW_SIX_BITS) as usize];
+                tmp[19] = self.encode_table[((input_u64 >> 40) & LOW_SIX_BITS) as usize];
+                tmp[20] = self.encode_table[((input_u64 >> 34) & LOW_SIX_BITS) as usize];
+                tmp[21] = self.encode_table[((input_u64 >> 28) & LOW_SIX_BITS) as usize];
+                tmp[22] = self.encode_table[((input_u64 >> 22) & LOW_SIX_BITS) as usize];
+                tmp[23] = self.encode_table[((input_u64 >> 16) & LOW_SIX_BITS) as usize];
 
                 let input_u64 = read_u64(&input_chunk[18..]);
 
-                output_chunk[24] = self.encode_table[((input_u64 >> 58) & LOW_SIX_BITS) as usize];
-                output_chunk[25] = self.encode_table[((input_u64 >> 52) & LOW_SIX_BITS) as usize];
-                output_chunk[26] = self.encode_table[((input_u64 >> 46) & LOW_SIX_BITS) as usize];
-                output_chunk[27] = self.encode_table[((input_u64 >> 40) & LOW_SIX_BITS) as usize];
-                output_chunk[28] = self.encode_table[((input_u64 >> 34) & LOW_SIX_BITS) as usize];
-                output_chunk[29] = self.encode_table[((input_u64 >> 28) & LOW_SIX_BITS) as usize];
-                output_chunk[30] = self.encode_table[((input_u64 >> 22) & LOW_SIX_BITS) as usize];
-                output_chunk[31] = self.encode_table[((input_u64 >> 16) & LOW_SIX_BITS) as usize];
+                tmp[24] = self.encode_table[((input_u64 >> 58) & LOW_SIX_BITS) as usize];
+                tmp[25] = self.encode_table[((input_u64 >> 52) & LOW_SIX_BITS) as usize];
+                tmp[26] = self.encode_table[((input_u64 >> 46) & LOW_SIX_BITS) as usize];
+                tmp[27] = self.encode_table[((input_u64 >> 40) & LOW_SIX_BITS) as usize];
+                tmp[28] = self.encode_table[((input_u64 >> 34) & LOW_SIX_BITS) as usize];
+                tmp[29] = self.encode_table[((input_u64 >> 28) & LOW_SIX_BITS) as usize];
+                tmp[30] = self.encode_table[((input_u64 >> 22) & LOW_SIX_BITS) as usize];
+                tmp[31] = self.encode_table[((input_u64 >> 16) & LOW_SIX_BITS) as usize];
+
+                // SAFETY: &[T] and &[MaybeUninit<T>] have the same layout.
+                // TODO: use MaybeUninit::write_slice once it’s stable.
+                let tmp = unsafe { core::mem::transmute(&tmp[..]) };
+                let out = &mut output[output_index..(output_index + 32)];
+                out.copy_from_slice(tmp);
 
                 output_index += BLOCKS_PER_FAST_LOOP * 8;
                 input_index += BLOCKS_PER_FAST_LOOP * 6;
@@ -128,33 +134,41 @@ impl super::Engine for GeneralPurpose {
 
         // start at the first index not handled by fast loop, which may be 0.
 
+        #[allow(unused_results)]
         while input_index < start_of_rem {
             let input_chunk = &input[input_index..(input_index + 3)];
             let output_chunk = &mut output[output_index..(output_index + 4)];
 
-            output_chunk[0] = self.encode_table[(input_chunk[0] >> 2) as usize];
-            output_chunk[1] = self.encode_table
-                [((input_chunk[0] << 4 | input_chunk[1] >> 4) & LOW_SIX_BITS_U8) as usize];
-            output_chunk[2] = self.encode_table
-                [((input_chunk[1] << 2 | input_chunk[2] >> 6) & LOW_SIX_BITS_U8) as usize];
-            output_chunk[3] = self.encode_table[(input_chunk[2] & LOW_SIX_BITS_U8) as usize];
+            output_chunk[0].write(self.encode_table[(input_chunk[0] >> 2) as usize]);
+            output_chunk[1].write(
+                self.encode_table
+                    [((input_chunk[0] << 4 | input_chunk[1] >> 4) & LOW_SIX_BITS_U8) as usize],
+            );
+            output_chunk[2].write(
+                self.encode_table
+                    [((input_chunk[1] << 2 | input_chunk[2] >> 6) & LOW_SIX_BITS_U8) as usize],
+            );
+            output_chunk[3].write(self.encode_table[(input_chunk[2] & LOW_SIX_BITS_U8) as usize]);
 
             input_index += 3;
             output_index += 4;
         }
 
+        #[allow(unused_results)]
         if rem == 2 {
-            output[output_index] = self.encode_table[(input[start_of_rem] >> 2) as usize];
-            output[output_index + 1] =
+            output[output_index].write(self.encode_table[(input[start_of_rem] >> 2) as usize]);
+            output[output_index + 1].write(
                 self.encode_table[((input[start_of_rem] << 4 | input[start_of_rem + 1] >> 4)
-                    & LOW_SIX_BITS_U8) as usize];
-            output[output_index + 2] =
-                self.encode_table[((input[start_of_rem + 1] << 2) & LOW_SIX_BITS_U8) as usize];
+                    & LOW_SIX_BITS_U8) as usize],
+            );
+            output[output_index + 2].write(
+                self.encode_table[((input[start_of_rem + 1] << 2) & LOW_SIX_BITS_U8) as usize],
+            );
             output_index += 3;
         } else if rem == 1 {
-            output[output_index] = self.encode_table[(input[start_of_rem] >> 2) as usize];
-            output[output_index + 1] =
-                self.encode_table[((input[start_of_rem] << 4) & LOW_SIX_BITS_U8) as usize];
+            output[output_index].write(self.encode_table[(input[start_of_rem] >> 2) as usize]);
+            output[output_index + 1]
+                .write(self.encode_table[((input[start_of_rem] << 4) & LOW_SIX_BITS_U8) as usize]);
             output_index += 2;
         }
 
