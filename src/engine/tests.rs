@@ -39,73 +39,67 @@ fn rfc_test_vectors_std_alphabet<E: EngineWrapper>(engine_wrapper: E) {
     ];
 
     let engine = E::standard();
+    let engine_permissive = E::standard_with_pad_mode(false, DecodePaddingMode::Indifferent);
     let engine_no_padding = E::standard_unpadded();
 
-    for (orig, encoded) in &data {
-        let encoded_without_padding = encoded.trim_end_matches('=');
+    fn test<E: Engine>(engine: &E, decoded: &[u8], encoded: &str, indifferent: bool) {
+        let encoded_no_padding = encoded.trim_end_matches('=');
+        let has_padding = encoded.len() != encoded_no_padding.len();
+        let engine_with_padding = engine.config().encode_padding();
+        let accepts_padding = engine_with_padding || indifferent;
 
-        // unpadded
+        // internal_encode always encodes without padding.
         {
-            let mut encode_buf = [0_u8; 8];
-            let mut decode_buf = [0_u8; 6];
+            let mut buffer = [0; 8];
+            let len = engine.internal_encode(decoded, &mut buffer[..]);
+            let (got_encoded, tail) = buffer.split_at(len);
+            assert_eq!(encoded_no_padding.as_bytes(), got_encoded);
+            assert!(tail.iter().all(|v| *v == 0));
+        }
 
-            let encode_len =
-                engine_no_padding.internal_encode(orig.as_bytes(), &mut encode_buf[..]);
-            assert_eq!(
-                &encoded_without_padding,
-                &std::str::from_utf8(&encode_buf[0..encode_len]).unwrap()
-            );
-            let decode_len = engine_no_padding
-                .decode_slice_unchecked(encoded_without_padding.as_bytes(), &mut decode_buf[..])
-                .unwrap();
-            assert_eq!(orig.len(), decode_len);
+        // encode_slice encodes with or without padding as per configuration.
+        {
+            let mut buffer = [0; 8];
+            let len = engine.encode_slice(decoded, &mut buffer[..]).unwrap();
+            let (got_encoded, tail) = buffer.split_at(len);
+            let want_encoded = if engine_with_padding { encoded } else { encoded_no_padding };
+            assert_eq!(want_encoded.as_bytes(), got_encoded);
+            assert!(tail.iter().all(|v| *v == 0));
+        }
 
-            assert_eq!(
-                orig,
-                &std::str::from_utf8(&decode_buf[0..decode_len]).unwrap()
-            );
-
-            // if there was any padding originally, the no padding engine won't decode it
-            if encoded.as_bytes().contains(&PAD_BYTE) {
-                assert_eq!(
-                    Err(DecodeError::InvalidPadding),
-                    engine_no_padding.decode(encoded)
-                )
+        // Test decoding of string with padding.
+        {
+            let mut buffer = [0; 6];
+            let res = engine.decode_slice_unchecked(encoded.as_bytes(), &mut buffer[..]);
+            if has_padding && !accepts_padding {
+                assert_eq!(Err(crate::DecodeError::InvalidPadding), res);
+            } else {
+                let len = res.unwrap();
+                let (got_decoded, tail) = buffer.split_at(len);
+                assert_eq!(decoded, got_decoded);
+                assert!(tail.iter().all(|v| *v == 0));
             }
         }
 
-        // padded
-        {
-            let mut encode_buf = [0_u8; 8];
-            let mut decode_buf = [0_u8; 6];
-
-            let encode_len = engine.internal_encode(orig.as_bytes(), &mut encode_buf[..]);
-            assert_eq!(
-                // doesn't have padding added yet
-                &encoded_without_padding,
-                &std::str::from_utf8(&encode_buf[0..encode_len]).unwrap()
-            );
-            let pad_len = add_padding(encode_len, &mut encode_buf[encode_len..]);
-            assert_eq!(encoded.as_bytes(), &encode_buf[..encode_len + pad_len]);
-
-            let decode_len = engine
-                .decode_slice_unchecked(encoded.as_bytes(), &mut decode_buf[..])
-                .unwrap();
-            assert_eq!(orig.len(), decode_len);
-
-            assert_eq!(
-                orig,
-                &std::str::from_utf8(&decode_buf[0..decode_len]).unwrap()
-            );
-
-            // if there was (canonical) padding, and we remove it, the standard engine won't decode
-            if encoded.as_bytes().contains(&PAD_BYTE) {
-                assert_eq!(
-                    Err(DecodeError::InvalidPadding),
-                    engine.decode(encoded_without_padding)
-                )
+        // Test decoding of string without padding.
+        if has_padding {
+            let mut buffer = [0; 6];
+            let res = engine.decode_slice_unchecked(encoded_no_padding.as_bytes(), &mut buffer[..]);
+            if engine_with_padding {
+                assert_eq!(Err(crate::DecodeError::InvalidPadding), res);
+            } else {
+                let len = res.unwrap();
+                let (got_decoded, tail) = buffer.split_at(len);
+                assert_eq!(decoded, got_decoded);
+                assert!(tail.iter().all(|v| *v == 0));
             }
         }
+    }
+
+    for (decoded, encoded) in &data {
+        test(&engine, decoded.as_bytes(), encoded, false);
+        test(&engine_permissive, decoded.as_bytes(), encoded, true);
+        test(&engine_no_padding, decoded.as_bytes(), encoded, false);
     }
 }
 
